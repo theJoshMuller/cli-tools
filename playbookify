@@ -1,0 +1,113 @@
+#!/bin/bash
+#
+# playbookify.sh - Automates video processing and publishing.
+#
+# This script uploads a video, transcribes it, generates an AI title,
+# renames the files, and copies them to a Google Drive remote via rclone.
+#
+# Usage:
+#   ./playbookify.sh /path/to/my/video.mp4
+#
+# Dependencies:
+#   - On the server: ffmpeg, whisper, rclone (configured for GDrive)
+#   - On this machine: jq
+#   - An environment variable $OPENROUTER_API_KEY must be set.
+#
+
+# Exit immediately if a command exits with a non-zero status.
+set -e
+
+# --- CONFIGURATION ---
+server="yeshu@192.168.20.9"
+remote_dir="playbooks"
+gdrive_remote="waha.app_gd"
+gdrive_dir="Playbooks"
+ai_model="qwen/qwen3-235b-a22b-07-25:nitro"
+
+# --- PRE-FLIGHT CHECKS ---
+if ! command -v jq &> /dev/null; then
+  echo "❌ Error: jq is not installed. Please install it to proceed."
+  exit 1
+fi
+if [ -z "$OPENROUTER_API_KEY" ]; then
+  echo "❌ Error: OPENROUTER_API_KEY environment variable is not set."
+  exit 1
+fi
+if [ -z "$1" ]; then
+  echo "❌ Error: No video file provided."
+  echo "Usage: ./playbookify.sh /path/to/video.mp4"
+  exit 1
+fi
+
+# --- SCRIPT ---
+local_file_path="$1"
+filename=$(basename -- "$local_file_path")
+base_name="${filename%.*}"
+remote_mp4_name="${base_name}.mp4"
+remote_srt_name="${base_name}.srt"
+
+echo "🚀 Starting playbookify process for: $filename"
+
+# Step 1: Upload the video file
+echo "1/6: 📤 Uploading video to $server..."
+rsync -Puv "$local_file_path" "$server:$remote_dir/"
+
+# Steps 2 & 3: Re-encode (if needed) and Transcribe on the server
+echo "2/6: 🎬 Re-encoding and transcribing on server (this may take a while)..."
+ssh "$server" "
+  set -e
+  cd ~/$remote_dir
+  echo 'Converting to MP4...'
+  ffmpeg -i \"$filename\" -n \"$remote_mp4_name\"
+  echo 'Activating Python venv...'
+  source ~/waha-ai-timestamper-cli/venv/bin/activate
+  echo 'Running Whisper transcription...'
+  whisper \"$remote_mp4_name\" --language en --output_format srt --word_timestamps True
+"
+
+# Step 4: Get SRT content and generate title with AI
+echo "3/6: 🤖 Generating title with AI..."
+srt_content=$(ssh "$server" "cat ~/$remote_dir/\"$remote_srt_name\"")
+# MODIFIED PROMPT: Asks for a natural, capitalized title.
+intro_prompt="Generate a concise, human-readable title for the following video transcript. The title should be in title case, like a normal document title. Do not include any illegal filename characters like slashes. Respond with ONLY the title itself. Transcript:\n\n"
+
+payload=$(tr -d '\r' <<< "$srt_content" | jq -Rs --arg model "$ai_model" --arg intro "$intro_prompt" '{
+    "model": $model,
+    "messages": [{"role": "user", "content": ($intro + .)}],
+    "max_tokens": 20
+}')
+
+title_response=$(curl -s -H "Authorization: Bearer $OPENROUTER_API_KEY" \
+                     -H "Content-Type: application/json" \
+                     -d "$payload" \
+                     https://openrouter.ai/api/v1/chat/completions)
+
+new_title=$(echo "$title_response" | jq -r '.choices[0].message.content')
+
+if [ -z "$new_title" ] || [ "$new_title" == "null" ]; then
+    echo "❌ Error: AI failed to generate a title. Response: $title_response"
+    exit 1
+fi
+
+# MODIFIED SANITIZATION: Removes only illegal characters, preserving case and spaces.
+sanitized_title=$(echo "$new_title" | sed 's/[/\\?%*:|"<>]/ /g' | sed 's/  */ /g' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+echo "✨ AI-generated title: $sanitized_title"
+
+# Step 5: Rename the files on the server
+echo "4/6: ✍️ Renaming files on the server..."
+ssh "$server" "
+  cd ~/$remote_dir
+  mv \"$remote_mp4_name\" \"$sanitized_title.mp4\"
+  mv \"$remote_srt_name\" \"$sanitized_title.srt\"
+"
+
+# Step 6: Create remote directory and move files with rclone FROM THE SERVER
+echo "5/6: 🚚 Creating GDrive directory and copying files from server..."
+ssh "$server" "rclone copy -Puv ~/${remote_dir}/ \"${gdrive_remote}:${gdrive_dir}/${sanitized_title}/\" --include \"${sanitized_title}.mp4\" --include \"${sanitized_title}.srt\""
+
+
+# Step 7: Clean up processed files on the server
+echo "6/6: 🧹 Cleaning up processed files on server..."
+ssh "$server" "rm ~/$remote_dir/\"$sanitized_title.mp4\" ~/$remote_dir/\"$filename\" ~/$remote_dir/\"$sanitized_title.srt\""
+
+echo "✅ Success! Playbook '$sanitized_title' created."
