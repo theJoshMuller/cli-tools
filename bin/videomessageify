@@ -1,12 +1,12 @@
 #!/bin/bash
 #
-# playbookify.sh - Automates video processing and publishing.
+# videomessageify.sh - Automates video processing and publishing.
 #
 # This script uploads a video, transcribes it, generates an AI title,
 # renames the files, and copies them to a Google Drive remote via rclone.
 #
 # Usage:
-#   ./playbookify.sh /path/to/my/video.mp4
+#   ./videomessageify.sh /path/to/my/video.mp4
 #
 # Dependencies:
 #   - On the server: ffmpeg, whisper, rclone (configured for GDrive)
@@ -19,17 +19,19 @@ set -e
 
 # --- CONFIGURATION ---
 server="yeshu@${STORMFATHER_IP:-192.168.20.23}"
-remote_dir="playbooks"
+remote_dir="videomessages"
 gdrive_remote="waha.app_gd"
-gdrive_dir="Playbooks"
+gdrive_dir="Video Messages"
 ai_model="qwen/qwen3-235b-a22b-07-25:nitro"
 
 # --- PRE-FLIGHT CHECKS ---
-if ! command -v jq &> /dev/null; then
+if ! command -v jq &> /dev/null;
+then
   echo "❌ Error: jq is not installed. Please install it to proceed."
   exit 1
 fi
-if [ -z "$OPENROUTER_API_KEY" ]; then
+if [ -z "$OPENROUTER_API_KEY" ];
+then
   echo "❌ Error: OPENROUTER_API_KEY environment variable is not set."
   exit 1
 fi
@@ -44,7 +46,7 @@ if [ -z "$1" ]; then
     exit 1
   fi
   
-  read -p "No file specified. Do you want to run playbookify on the most recent file, '$latest_file'? (Y/n) " -r response
+  read -p "No file specified. Do you want to run videomessageify on the most recent file, '$latest_file'? (Y/n) " -r response
   if [[ "$response" =~ ^[Yy]$ ]] || [ -z "$response" ]; then
     local_file_path="$latest_file"
   else
@@ -59,7 +61,7 @@ base_name="${filename%.*}"
 remote_mp4_name="processed.mp4"
 remote_srt_name="processed.srt"
 
-echo "🚀 Starting playbookify process for: $filename"
+echo "🚀 Starting videomessageify process for: $filename"
 
 # Step 1: Upload the video file
 echo "1/6: 📤 Uploading video to $server..."
@@ -88,14 +90,10 @@ if [ "$transcription_success" = true ]; then
   # Step 4: Get SRT content and generate title with AI
   echo "3/6: 🤖 Generating title with AI..."
   srt_content=$(ssh "$server" "cat ~/$remote_dir/\"$remote_srt_name\"")
-  # MODIFIED PROMPT: Asks for a natural, capitalized title.
+  # MODIFIED PROMPT: Asks for a natural, capitalized title. 
   intro_prompt="Generate a concise, human-readable title for the following video transcript. The title should be in title case, like a normal document title. Do not include any illegal filename characters like slashes. Respond with ONLY the title itself. Transcript:\n\n"
 
-  payload=$(tr -d '\r' <<< "$srt_content" | jq -Rs --arg model "$ai_model" --arg intro "$intro_prompt" '{
-    "model": $model,
-    "messages": [{"role": "user", "content": ($intro + .)}],
-    "max_tokens": 20
-}')
+  payload=$(tr -d '\r' <<< "$srt_content" | jq -Rs --arg model "$ai_model" --arg intro "$intro_prompt" '{ "model": $model, "messages": [{"role": "user", "content": ($intro + .)}], "max_tokens": 20 }')
 
   title_response=$(curl -s -H "Authorization: Bearer $OPENROUTER_API_KEY" \
                        -H "Content-Type: application/json" \
@@ -152,7 +150,7 @@ else
 fi
 
 if [ "$transcription_success" = true ]; then
-  echo "✅ Success! Playbook '$sanitized_title' created with transcription."
+  echo "✅ Success! Video Message '$sanitized_title' created with transcription."
 else
-  echo "✅ Success! Playbook '$sanitized_title' created (transcription was skipped due to Whisper failure)."
+  echo "✅ Success! Video Message '$sanitized_title' created (transcription was skipped due to Whisper failure)."
 fi
